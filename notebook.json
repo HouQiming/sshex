@@ -30,16 +30,21 @@ v2
    "in_m_enable_wrapping": 0
   }
  ],
- "m_last_focus_cell_id": 2
+ "m_last_focus_cell_id": 0
 }
 =====í¯¿í¿¿=====
 # TODO LIST
-sftp download / port / .. support
+mget / mput
+install scripts
+script refinement
+	tty test
+	chcp
 sshex.js - could make it work in qpad...
 	make the windows cmd read qpad env vars
 
 =====í¯¿í¿¿=====
 #!/bin/sh
+#[interactive]
 #[button: Run]
 #build script for the project
 sshex a@192.168.111.50

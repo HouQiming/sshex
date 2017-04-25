@@ -1,14 +1,204 @@
 'use strict'
+const colors=require('colors/safe');
 const path=require('path');
 const os=require('os');
 const fs=require('fs');
+const net=require('net');
 const readline = require('readline');
 const child_process=require('child_process');
 const options=require('commander');
+const stringArgv = require('string-argv');
 const Client = require('ssh2').Client;
 const ESCAPE_KEY='\u0011';
+const MAX_LINE_BUF=256;
+colors.enabled=1;
+
+var g_commands={
+	//todo: install key, maybe HTTP server for port forwarding...
+	'help':function(conn,args,callback){
+		process.stdout.write([
+			"Welcome to the sshex escape prompt, supported commands:\n",
+			"  get <remote_file> [local_file]\n",
+			"  put [local_file] <remote_file>\n",
+			"  port_forward <local_listening_port> <remote_host> <remote_port>\n",
+			"  port_reverse <remote_listening_port> <local_host> <local_port>\n",
+			"  port_list\n",
+			"  port_reset\n",
+			"  send_ctrl_q\n",
+			"  help\n",
+			"\n",
+			"The get and put commands operates in ~/Downloads by default.\n",
+			"\n",
+			"If you see an incorrect path, type this:\n",
+			"  export PS1='\\u@\\H:\\w\\$ '\n",
+		].join(''));
+		callback();
+	},
+	'get':function(conn,args,callback){
+		if(args.length<2){
+			callback(new Error('need a file name\n'));
+			return;
+		}
+		var remote_file,local_file;
+		if(args.length<3){
+			remote_file=args[1];
+			local_file=path.join(os.homedir(),'Downloads',path.posix.basename(remote_file));
+		}else{
+			remote_file=args[1];
+			local_file=path.resolve(os.homedir(),'Downloads',args[2]);
+		}
+		if(!remote_file.match(/^[~/]/)){
+			remote_file=[conn.m_their_pwd,'/',remote_file].join('');
+		}
+		if(remote_file.match(/^~\//)){
+			remote_file=remote_file.slice(2);
+		}
+		conn.sftp(function(err, sftp) {
+			if(err){callback(err);return;}
+			sftp.fastGet(remote_file,local_file,function(err) {
+				if(!err){
+					process.stdout.write(['downloaded ',colors.bold.green(remote_file),' to ',colors.bold.green(local_file),'\n'].join(''));
+				}
+				sftp.end();
+				callback(err);
+			});
+		});
+	},
+	'put':function(conn,args,callback){
+		if(args.length<2){
+			callback(new Error('need a file name\n'));
+			return;
+		}
+		var remote_file,local_file;
+		if(args.length<3){
+			remote_file=args[1];
+			local_file=path.join(os.homedir(),'Downloads',path.posix.basename(remote_file));
+		}else{
+			remote_file=args[2];
+			local_file=path.resolve(os.homedir(),'Downloads',args[1]);
+		}
+		if(!remote_file.match(/^[~/]/)){
+			remote_file=[conn.m_their_pwd,'/',remote_file].join('');
+		}
+		if(remote_file.match(/^~\//)){
+			remote_file=remote_file.slice(2);
+		}
+		conn.sftp(function(err, sftp) {
+			if(err){callback(err);return;}
+			sftp.fastPut(local_file,remote_file,function(err) {
+				if(!err){
+					process.stdout.write(['uploaded ',colors.bold.green(local_file),' to ',colors.bold.green(remote_file),'\n'].join(''));
+				}
+				sftp.end();
+				callback(err);
+			});
+		});
+	},
+	'port_forward':function(conn,args,callback){
+		if(args.length!==4){
+			callback(new Error('invalid syntax, please consult help\n'));
+			return;
+		}
+		var remote_host=args[2];
+		var remote_port=parseInt(args[3]);
+		var server_local=net.createServer(function(socket_local){
+			socket_local.pause();
+			conn.forwardOut(socket_local.remoteAddr||'127.0.0.1', parseInt(socket_local.remotePort||12345), 
+			remote_host, remote_port, function(err, socket_remote) {
+				socket_local.resume();
+				if(err){
+					process.stdout.write([colors.bold.red(err.message),'\n'].join(''));
+					socket_local.end();
+					return;
+				}
+				socket_remote.on('error',function(err){
+					process.stdout.write([colors.bold.red(err.message),'\n'].join(''));
+					socket_local.end();
+				})
+				socket_remote.on('close',function(){
+					socket_local.end();
+				}).on('data', function(data) {
+					socket_local.write(data);
+				});
+				socket_local.on('close', function(){
+					socket_remote.end();
+				}).on('data',function(data){
+					socket_remote.write(data);
+				});
+			});
+		});
+		server_local.on('error',function(err){
+			process.stdout.write([colors.bold.red(err.message),'\n'].join(''));
+		});
+		server_local.listen({
+			port:parseInt(args[1]),
+			host:'localhost',
+		});
+		conn.m_port_reset_jobs.push({type:'forward',server:server_local,desc:args})
+		callback();
+	},
+	'port_reverse':function(conn,args,callback){
+		if(args.length!==4){
+			callback(new Error('invalid syntax, please consult help\n'));
+			return;
+		}
+		var local_port=parseInt(args[3]);
+		var local_host=parseInt(args[2]);
+		var remote_port=parseInt(args[1]);
+		conn.forwardIn('localhost',remote_port,function(err) {
+			if(!err){
+				conn.m_port_reset_jobs.push({type:'reverse',port:remote_port,desc:args})
+				conn.m_reversing_ports[remote_port]=function(err,socket_remote){
+					var socket_local=net.connect({host:local_host,port:local_port});
+					socket_local.on('error',function(err){
+						process.stdout.write([colors.bold.red(err.message),'\n'].join(''));
+						socket_remote.end();
+					})
+					socket_local.on('close',function(){
+						socket_remote.end();
+					}).on('data', function(data) {
+						socket_remote.write(data);
+					});
+					socket_remote.on('close', function(){
+						socket_local.end();
+					}).on('data',function(data){
+						socket_local.write(data);
+					});
+				};
+			}
+			callback(err);
+		});
+	},
+	'port_list':function(conn,args,callback){
+		for(var i=0;i<conn.m_port_reset_jobs.length;i++){
+			process.stdout.write(conn.m_port_reset_jobs[i].desc.join(' ')+'\n');
+		}
+		callback();
+	},
+	'port_reset':function(conn,args,callback){
+		for(var i=0;i<conn.m_port_reset_jobs.length;i++){
+			var job_i=conn.m_port_reset_jobs[i];
+			if(job_i.type==='forward'){
+				job_i.server.close();
+			}else{
+				conn.unforwardIn('localhost',job_i.port);
+				conn.m_reversing_ports[job_i.port]=undefined;
+			}
+		}
+		conn.m_port_reset_jobs=[];
+		callback();
+	},
+	'send_ctrl_q':function(conn,args){
+		conn.m_shell_stream.write(ESCAPE_KEY);
+		callback();
+	},
+};
 
 (function(){
+	if(process.stdin.isTTY){
+		process.stdin.setRawMode(true);
+		process.stdin.setEncoding('utf8');
+	}
 	process.stdout.setEncoding('utf8');
 	process.stderr.setEncoding('utf8');
 	(options
@@ -33,8 +223,9 @@ const ESCAPE_KEY='\u0011';
 	}
 	var conn = new Client();
 	var in_escape_mode=0;
-	var escape_command=[];
+	var stdout_line_buf=new Buffer(0);
 	conn.on('ready', function() {
+		process.stdin.removeAllListeners();
 		var tty_desc={};
 		if(process.stdout.isTTY){
 			tty_desc={
@@ -51,11 +242,13 @@ const ESCAPE_KEY='\u0011';
 			if(options.winTerminalCols){tty_desc.cols=parseInt(options.winTerminalCols);}
 			if(tty_desc.rows||tty_desc.cols){
 				tty_desc.term=process.env["TERM"];
+				process.stdout.columns=tty_desc.cols;
 			}
 		}
 		var BindStdio=function(err, stream) {
 			if (err){throw err;}
 			var rl=undefined;
+			conn.m_shell_stream=stream;
 			stream.on('close', function() {
 				conn.end();
 				if(options.args.length==1){
@@ -64,6 +257,17 @@ const ESCAPE_KEY='\u0011';
 				}
 				process.exit();
 			}).on('data', function(data) {
+				if(data.length>MAX_LINE_BUF){
+					stdout_line_buf=new Buffer(data.slice(data.length-MAX_LINE_BUF));
+				}else{
+					stdout_line_buf=Buffer.concat([stdout_line_buf,data]);
+				}
+				var pnewline=stdout_line_buf.lastIndexOf(10);
+				if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline+1));}
+				pnewline=stdout_line_buf.lastIndexOf(7);
+				if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline));}
+				pnewline=stdout_line_buf.lastIndexOf(27);
+				if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline));}
 				process.stdout.write(data);
 			}).stderr.on('data', function(data) {
 				process.stderr.write(data);
@@ -72,58 +276,61 @@ const ESCAPE_KEY='\u0011';
 				stream.end();
 			});
 			process.stdin.on('data',function(data){
-				if(in_escape_mode){
-					//do nothing
-					/*var ch=data.toString('utf8');
-					if(ch===ESCAPE_KEY&&!escape_command.length){
-						in_escape_mode=0;
-						process.stdout.write('\u0008 \u0008');
-						stream.write(ESCAPE_KEY);
-						return;
+				if(in_escape_mode){return;}
+				if(data.length===1&&data.toString('utf8')===ESCAPE_KEY){
+					//get pwd from their bash prompt - keep a line buffer, use it to determine our prompt
+					var s_bash_prompt=stdout_line_buf.toString('utf8');
+					var match=s_bash_prompt.match(/\[[^ ]* (.*)\][#$][ \t]*$/);
+					if(!match){match=s_bash_prompt.match(/[^ :]*:(.*)[#$][ \t]*$/);}
+					var their_pwd='~';
+					if(match){
+						their_pwd=match[1];
 					}
-					switch(ch){
-					default:{
-						escape_command.push(ch);
-						process.stdout.write(data);
-					break;}case '\u0008':{
-						if(escape_command.length){
-							escape_command.pop();
-							//simple escape emulation
-							process.stdout.write('\u0008 \u0008');
+					//enter the escape mode
+					in_escape_mode=1;
+					rl=readline.createInterface({
+						completer:function(line,callback){
+							var hits=[];
+							for(var cmd in g_commands){
+								if(!line||cmd.indexOf(line)===0){
+									hits.push(cmd);
+								}
+							}
+							//todo: tab-over-the-sftp
+							callback(null,[hits,line]);
+						},
+						terminal:true,
+						input: process.stdin,
+						output: process.stdout,
+					});
+					conn.m_their_pwd=their_pwd;
+					rl.setPrompt(['sshex:',colors.bold.yellow(their_pwd),'$ '].join(''));
+					rl.prompt();
+					rl.on('line',function(line){
+						rl.pause();
+						var args=stringArgv(line);
+						var commandIsDone=function(err){
+							if(err){
+								process.stdout.write([colors.bold.red(err.message),'\n'].join(''));
+							}
+							process.stdout.write(s_bash_prompt);
+							rl.close();
+						};
+						if(args.length>0&&g_commands[args[0]]){
+							g_commands[args[0]](conn,args,commandIsDone);
+						}else{
+							commandIsDone(args[0]?new Error(['invalid command: "',args[0],'"'].join('')):undefined);
 						}
-					break;}case "\n":case '\r':case "\u0004":{
-						//command confirmed, send the key for a new bash prompt
-						var s_command=escape_command.join('');
+					});
+					rl.on('close',function(){
 						in_escape_mode=0;
-						stream.write(data);
-					}}*/
-				}else{
-					if(data.length===1){
-						//escape command
-						var ch=data.toString('utf8');
-						if(ch===ESCAPE_KEY){
-							//todo: get pwd from bash prompt - keep a line buffer, use it to determine our prompt
-							in_escape_mode=1;
-							escape_command=[];
-							rl=readline.createInterface({
-								//completer:,
-								terminal:true,
-								input: process.stdin,
-								output: process.stdout
-							});
-							rl.pause();
-							rl.prompt();
-							process.stdout.write('\r\u001b[0Ksftp> ');
-							return;
-						}
-					}
-					stream.write(data);
+						rl=undefined;
+						process.stdin.resume();
+					})
+					return;
 				}
+				stream.write(data);
 			});
-			if(process.stdin.isTTY){
-				process.stdin.setRawMode(true);
-				process.stdin.setEncoding('utf8');
-			}
 			if(process.stdout.isTTY){
 				process.stdout.on('resize',function(){
 					setWindow(process.stdout.rows,process.stdout.columns);
@@ -211,5 +418,26 @@ const ESCAPE_KEY='\u0011';
 			process.stdout.write([err.message,'\n','Connection failed'].join(''));
 		}
 	});
+	conn.on('tcp connection', function(info, accept, reject) {
+		var callback=conn.m_reversing_ports[info.destPort];
+		if(!callback){
+			reject();
+			return;
+		}
+		callback(null,accept());
+	});
+	//initial SIGINT test
+	process.stdin.on('data', function (ch) {
+		ch = ch.toString('utf8');
+		switch (ch) {
+		case "\u0003":
+			// Ctrl-C
+			process.exit(1);
+			break;
+		}
+	});
+	process.stdin.resume();
+	conn.m_port_reset_jobs=[];
+	conn.m_reversing_ports={};
 	conn.connect(session_desc);
 })();
