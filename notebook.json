@@ -34,13 +34,11 @@ v2
 }
 =====í¯¿í¿¿=====
 # TODO LIST
+install key
 mget / mput
-install scripts
-script refinement
-	tty test
-	chcp
-sshex.js - could make it work in qpad...
-	make the windows cmd read qpad env vars
+npm install scripts
+test on Linux
+release
 
 =====í¯¿í¿¿=====
 #!/bin/sh

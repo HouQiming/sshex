@@ -291,13 +291,42 @@ var g_commands={
 					rl=readline.createInterface({
 						completer:function(line,callback){
 							var hits=[];
-							for(var cmd in g_commands){
-								if(!line||cmd.indexOf(line)===0){
-									hits.push(cmd);
+							var args=stringArgv(line);
+							if(args.length>1){
+								//tab-over-the-sftp
+								var last_arg=args.pop();
+								var remote_basename=path.posix.basename(last_arg);
+								var remote_dir=path.posix.dirname(last_arg);
+								if(last_arg.match(/[/]$/)){
+									remote_basename='';
+									remote_dir=last_arg;
 								}
+								if(!remote_dir){
+									remote_dir=conn.m_their_pwd;
+								}else if(!remote_dir.match(/^[~/]/)){
+									remote_dir=[conn.m_their_pwd,'/',remote_dir].join('');
+								}
+								if(remote_dir.match(/^~\//)){
+									remote_dir=remote_dir.slice(2);
+								}
+								conn.sftp(function(err, sftp) {
+									if(err){callback(null,[hits,line]);return;}
+									sftp.readdir(remote_dir,{},function(err,list) {
+										sftp.end();
+										if(err){callback(null,[hits,line]);return;}
+										var hits_all=list.map(a=>a.filename+(a.attrs.isDirectory()?'/':''));
+										var hist_match=hits_all.filter(a=>(a.indexOf(remote_basename)===0));
+										callback(null,[hist_match.length?hist_match:hits_all,remote_basename]);
+									});
+								});
+							}else{
+								for(var cmd in g_commands){
+									if(!line||cmd.indexOf(line)===0){
+										hits.push(cmd);
+									}
+								}
+								callback(null,[hits,line]);
 							}
-							//todo: tab-over-the-sftp
-							callback(null,[hits,line]);
 						},
 						terminal:true,
 						input: process.stdin,
@@ -306,6 +335,10 @@ var g_commands={
 					conn.m_their_pwd=their_pwd;
 					rl.setPrompt(['sshex:',colors.bold.yellow(their_pwd),'$ '].join(''));
 					rl.prompt();
+					rl.on('SIGINT',function(line){
+						process.stdout.write('\r\u001b[0K'+s_bash_prompt);
+						rl.close();
+					});
 					rl.on('line',function(line){
 						rl.pause();
 						var args=stringArgv(line);
@@ -370,11 +403,10 @@ var g_commands={
 	};
 	conn.once('error',function(err){
 		//request password
-		if(process.stdin.isTTY){
-			if(process.stdin.isTTY){
-				process.stdin.setRawMode(true);
-				process.stdin.setEncoding('utf8');
-			}
+		if(options.args.length<2){
+			process.stdin.setRawMode(true);
+			process.stdin.setEncoding('utf8');
+			process.stdin.removeAllListeners();
 			process.stdin.resume();
 			process.stdout.write([options.args[0],"'s password: "].join(''));
 			var password_array=[];
