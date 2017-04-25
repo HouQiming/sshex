@@ -2,11 +2,15 @@
 const path=require('path');
 const os=require('os');
 const fs=require('fs');
+const readline = require('readline');
 const child_process=require('child_process');
 const options=require('commander');
 const Client = require('ssh2').Client;
+const ESCAPE_KEY='\u0011';
 
 (function(){
+	process.stdout.setEncoding('utf8');
+	process.stderr.setEncoding('utf8');
 	(options
 		.usage('[options] [user@]hostname [command]')
 		.option('-p, --port <port>', 'Specify a port',function(a){return parseInt(a);},22)
@@ -28,6 +32,8 @@ const Client = require('ssh2').Client;
 		hostname=parts.slice(1).join('@');
 	}
 	var conn = new Client();
+	var in_escape_mode=0;
+	var escape_command=[];
 	conn.on('ready', function() {
 		var tty_desc={};
 		if(process.stdout.isTTY){
@@ -48,7 +54,8 @@ const Client = require('ssh2').Client;
 			}
 		}
 		var BindStdio=function(err, stream) {
-			if (err) throw err;
+			if (err){throw err;}
+			var rl=undefined;
 			stream.on('close', function() {
 				conn.end();
 				if(options.args.length==1){
@@ -65,7 +72,53 @@ const Client = require('ssh2').Client;
 				stream.end();
 			});
 			process.stdin.on('data',function(data){
-				stream.write(data);
+				if(in_escape_mode){
+					//do nothing
+					/*var ch=data.toString('utf8');
+					if(ch===ESCAPE_KEY&&!escape_command.length){
+						in_escape_mode=0;
+						process.stdout.write('\u0008 \u0008');
+						stream.write(ESCAPE_KEY);
+						return;
+					}
+					switch(ch){
+					default:{
+						escape_command.push(ch);
+						process.stdout.write(data);
+					break;}case '\u0008':{
+						if(escape_command.length){
+							escape_command.pop();
+							//simple escape emulation
+							process.stdout.write('\u0008 \u0008');
+						}
+					break;}case "\n":case '\r':case "\u0004":{
+						//command confirmed, send the key for a new bash prompt
+						var s_command=escape_command.join('');
+						in_escape_mode=0;
+						stream.write(data);
+					}}*/
+				}else{
+					if(data.length===1){
+						//escape command
+						var ch=data.toString('utf8');
+						if(ch===ESCAPE_KEY){
+							//todo: get pwd from bash prompt - keep a line buffer, use it to determine our prompt
+							in_escape_mode=1;
+							escape_command=[];
+							rl=readline.createInterface({
+								//completer:,
+								terminal:true,
+								input: process.stdin,
+								output: process.stdout
+							});
+							rl.pause();
+							rl.prompt();
+							process.stdout.write('\r\u001b[0Ksftp> ');
+							return;
+						}
+					}
+					stream.write(data);
+				}
 			});
 			if(process.stdin.isTTY){
 				process.stdin.setRawMode(true);

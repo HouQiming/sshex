@@ -15,19 +15,42 @@ v2
    "m_project_hotkey": "F5",
    "in_m_current_wrap_width": 512,
    "in_m_enable_wrapping": 0
+  },
+  {
+   "m_language": "Unix Shell Script",
+   "m_cell_id": 2,
+   "m_button_name": "Install",
+   "in_m_current_wrap_width": 512,
+   "in_m_enable_wrapping": 0
+  },
+  {
+   "m_language": "Windows BAT",
+   "m_cell_id": 3,
+   "in_m_current_wrap_width": 512,
+   "in_m_enable_wrapping": 0
   }
  ],
  "m_last_focus_cell_id": 2
 }
 =====í¯¿í¿¿=====
 # TODO LIST
-add 
-just need to fix node's broken built-in terminal...
+sftp download / port / .. support
+sshex.js - could make it work in qpad...
+	make the windows cmd read qpad env vars
 
 =====í¯¿í¿¿=====
 #!/bin/sh
-#[full tab]
 #[button: Run]
 #build script for the project
-#./sshex.sh a@192.168.111.50
-./sshex.sh -p 2200 xiangxin@192.168.0.101
+sshex a@192.168.111.50
+#./sshex.sh -p 2200 xiangxin@192.168.0.101
+
+=====í¯¿í¿¿=====
+#!/bin/sh
+#[button: Install]
+cp sshex.sh /usr/bin/sshex
+cp sshex.cmd /usr/bin/
+
+=====í¯¿í¿¿=====
+@echo off
+sshex a@192.168.111.50
