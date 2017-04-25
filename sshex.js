@@ -24,10 +24,11 @@ var g_commands={
 			"  port_reverse <remote_listening_port> <local_host> <local_port>\n",
 			"  port_list\n",
 			"  port_reset\n",
+			"  install_key\n",
 			"  send_ctrl_q\n",
 			"  help\n",
 			"\n",
-			"The get and put commands operates in ~/Downloads by default.\n",
+			"The get and put commands operate in ~/Downloads by default.\n",
 			"\n",
 			"If you see an incorrect path, type this:\n",
 			"  export PS1='\\u@\\H:\\w\\$ '\n",
@@ -188,9 +189,34 @@ var g_commands={
 		conn.m_port_reset_jobs=[];
 		callback();
 	},
-	'send_ctrl_q':function(conn,args){
+	'send_ctrl_q':function(conn,args,callback){
 		conn.m_shell_stream.write(ESCAPE_KEY);
 		callback();
+	},
+	'install_key':function(conn,args,callback){
+		if(!conn.m_fn_private_key){
+			callback(new Error('unable to find your key'));
+			return;
+		}
+		var buf_pubkey=undefined;
+		try{
+			buf_pubkey=fs.readFileSync([conn.m_fn_private_key,'.pub'].join(''));
+		}catch(err){
+			callback(new Error('unable to find your key'));
+			return;
+		}
+		if(!buf_pubkey){
+			callback(new Error('unable to find your key'));
+			return;
+		}
+		conn.exec(["mkdir -p ~/.ssh;cat >> ~/.ssh/authorized_keys <<'EOF'\n",buf_pubkey.toString(),'EOF\n'].join(''),{pty:false},function(err, stream) {
+			if(err){callback(err);return;}
+			stream.end();
+			process.stdout.write(['installed ',
+				colors.bold.green([conn.m_fn_private_key,'.pub'].join('')),' to ',
+				colors.bold.green('~/.ssh/authorized_keys'),'\n'].join(''));
+			callback();
+		});
 	},
 };
 
@@ -379,9 +405,11 @@ var g_commands={
 		}
 	})
 	var private_key=undefined;
+	var fn_private_key=undefined;
 	if(options.identity){
 		try{
 			private_key=fs.readFileSync(options.identity);
+			fn_private_key=options.identity;
 		}catch(err){
 			process.stdout.write(['failed to read ',options.identity].join(''));
 		}
@@ -389,11 +417,14 @@ var g_commands={
 		var names=['id_rsa','id_dsa','id_ecdsa','id_ed25519'];
 		for(var i=0;i<names.length;i++){
 			try{
-				private_key=fs.readFileSync(path.join(os.homedir(),'.ssh',names[i]));
+				var fn_i=path.join(os.homedir(),'.ssh',names[i]);
+				private_key=fs.readFileSync(fn_i);
+				fn_private_key=fn_i;
 				break;
 			}catch(err){}
 		}
 	}
+	conn.m_fn_private_key=fn_private_key;
 	var session_desc={
 		host: hostname,
 		port: options.port,

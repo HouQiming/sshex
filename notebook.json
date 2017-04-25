@@ -34,7 +34,6 @@ v2
 }
 =====í¯¿í¿¿=====
 # TODO LIST
-install key
 mget / mput
 npm install scripts
 test on Linux
