@@ -1,10 +1,10 @@
 'use strict'
 const path=require('path');
 const os=require('os');
-const fs = require('fs');
+const fs=require('fs');
+const child_process=require('child_process');
 const options=require('commander');
 const Client = require('ssh2').Client;
-const readline = require('readline');
 
 (function(){
 	(options
@@ -13,14 +13,12 @@ const readline = require('readline');
 		.option('-i, --identity', 'Specify a private key file')
 		.option('-t, --pty', 'Request a pty')
 		.option('-C, --compression', 'Request compression')
+		.option('--win-terminal-rows <rows>', 'Specify the number of rows in a windows terminal emulator')
+		.option('--win-terminal-cols <cols>', 'Specify the number of columns in a windows terminal emulator')
 		.parse(process.argv));
-	if(options.args.length<1){
+	if(options.args.length<1||!options.args[0]){
 		options.outputHelp();
 		return;
-	}
-	if(process.stdin.isTTY){
-		process.stdin.setRawMode(true);
-		process.stdin.setEncoding('utf8');
 	}
 	var hostname=options.args[0];
 	var parts=hostname.split('@');
@@ -34,18 +32,29 @@ const readline = require('readline');
 		var tty_desc={};
 		if(process.stdout.isTTY){
 			tty_desc={
-					rows:process.stdout.rows,
-					cols:process.stdout.columns,
-					term:process.env["TERM"]||"cygwin",
+				rows:process.stdout.rows,
+				cols:process.stdout.columns,
+				term:process.env["TERM"]||"cygwin",
 			};
 		}else{
-			//todo
+			//if(process.platform==='win32'){
+			//	tty_desc.rows=parseInt(process.env["LINES"]);
+			//	tty_desc.cols=parseInt(process.env["COLUMNS"])
+			//}
+			if(options.winTerminalRows){tty_desc.rows=parseInt(options.winTerminalRows);}
+			if(options.winTerminalCols){tty_desc.cols=parseInt(options.winTerminalCols);}
+			if(tty_desc.rows||tty_desc.cols){
+				tty_desc.term=process.env["TERM"];
+			}
 		}
 		var BindStdio=function(err, stream) {
 			if (err) throw err;
 			stream.on('close', function() {
 				conn.end();
-				console.log('connection closed');
+				if(options.args.length==1){
+					//shell
+					console.log('Connection to',hostname,'closed.');
+				}
 				process.exit();
 			}).on('data', function(data) {
 				process.stdout.write(data);
@@ -58,6 +67,10 @@ const readline = require('readline');
 			process.stdin.on('data',function(data){
 				stream.write(data);
 			});
+			if(process.stdin.isTTY){
+				process.stdin.setRawMode(true);
+				process.stdin.setEncoding('utf8');
+			}
 			if(process.stdout.isTTY){
 				process.stdout.on('resize',function(){
 					setWindow(process.stdout.rows,process.stdout.columns);
@@ -66,7 +79,7 @@ const readline = require('readline');
 			process.stdin.resume();
 		};
 		if(options.args.length>=2){
-			var cmd_string=options.args.slice(1).join(';');
+			var cmd_string=options.args.slice(1).join(' ');
 			conn.exec(cmd_string,{pty:options.pty},BindStdio);
 		}else{
 			conn.shell(tty_desc,BindStdio);
@@ -98,6 +111,10 @@ const readline = require('readline');
 	conn.once('error',function(err){
 		//request password
 		if(process.stdin.isTTY){
+			if(process.stdin.isTTY){
+				process.stdin.setRawMode(true);
+				process.stdin.setEncoding('utf8');
+			}
 			process.stdin.resume();
 			process.stdout.write([options.args[0],"'s password: "].join(''));
 			var password_array=[];

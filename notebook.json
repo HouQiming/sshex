@@ -21,9 +21,13 @@ v2
 }
 =====í¯¿í¿¿=====
 # TODO LIST
+add 
+just need to fix node's broken built-in terminal...
 
 =====í¯¿í¿¿=====
 #!/bin/sh
+#[full tab]
 #[button: Run]
 #build script for the project
-node sshex.js a@192.168.111.50
+#./sshex.sh a@192.168.111.50
+./sshex.sh -p 2200 xiangxin@192.168.0.101
