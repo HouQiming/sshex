@@ -12,11 +12,8 @@
   "devDependencies": {},
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "install": "node shadow_cmd_for_msys_ish.js install",
-    "uninstall": "node shadow_cmd_for_msys_ish.js uninstall"
-  },
-  "bin": {
-    "sshex": "sshex.js"
+    "install": "node create_bins.js install",
+    "uninstall": "node create_bins.js uninstall"
   },
   "keywords": [
     "ssh",
