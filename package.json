@@ -15,6 +15,9 @@
     "install": "node shadow_cmd_for_msys_ish.js install",
     "uninstall": "node shadow_cmd_for_msys_ish.js uninstall"
   },
+  "bin": {
+    "sshex": "sshex.js"
+  },
   "keywords": [
     "ssh",
     "client"

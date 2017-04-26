@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 'use strict'
 const path=require('path');
 const os=require('os');
@@ -390,6 +391,10 @@ var g_commands={
 					rl.on('close',function(){
 						in_escape_mode=0;
 						rl=undefined;
+						if(process.stdin.isTTY){
+							process.stdin.setRawMode(true);
+							process.stdin.setEncoding('utf8');
+						}
 						process.stdin.resume();
 					})
 					return;
