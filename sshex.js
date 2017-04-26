@@ -240,11 +240,16 @@ var g_commands={
 		.option('-C, --compression', 'Request compression')
 		.option('-L, --port_forward <port_url_port>', 'Forward a remote connection to a local port',collect,[])
 		.option('-R, --port_reverse <port_url_port>', 'Forward a local connection to a remote port',collect,[])
+		.option('--win-alternative-terminal <tty>', 'Specify that the stdin pipe is actually a pty')
 		.option('--win-terminal-rows <rows>', 'Specify the number of rows in a windows terminal emulator')
 		.option('--win-terminal-cols <cols>', 'Specify the number of columns in a windows terminal emulator')
 		.parse(process.argv));
 	if(options.args.length<1||!options.args[0]){
-		options.outputHelp();
+		if(options.winAlternativeTerminal){
+			options.outputHelp(function(s){return s.replace(/\n/g,'\r\n')});
+		}else{
+			options.outputHelp();
+		}
 		return;
 	}
 	var hostname=options.args[0];
@@ -281,6 +286,7 @@ var g_commands={
 		var BindStdio=function(err, stream) {
 			if (err){throw err;}
 			var rl=undefined;
+			var winch_catcher=null;
 			conn.m_shell_stream=stream;
 			stream.on('close', function() {
 				conn.end();
@@ -288,7 +294,14 @@ var g_commands={
 					//shell
 					console.log('Connection to',hostname,'closed.');
 				}
-				process.exit();
+				if(winch_catcher){
+					winch_catcher.kill('SIGINT');
+					winch_catcher.on('exit',function(){
+						process.exit();
+					});
+				}else{
+					process.exit();
+				}
 			}).on('data', function(data) {
 				if(data.length>MAX_LINE_BUF){
 					stdout_line_buf=new Buffer(data.slice(data.length-MAX_LINE_BUF));
@@ -403,8 +416,25 @@ var g_commands={
 			});
 			if(process.stdout.isTTY){
 				process.stdout.on('resize',function(){
-					setWindow(process.stdout.rows,process.stdout.columns);
+					stream.setWindow(process.stdout.rows,process.stdout.columns);
 				})
+			}else if(options.winAlternativeTerminal){
+				winch_catcher=child_process.spawn("sh.exe",[path.join(__dirname,"catch_winch.sh"),options.winAlternativeTerminal],{
+					stdio:['ignore', 'inherit', 'pipe']
+				},function(){
+					//do nothing
+				});
+				if(winch_catcher){
+					winch_catcher.stderr.on('data',function(data){
+						try{
+							var s=data.toString();
+							var wnd=s.replace(/[\r\n]/g,'').split(' ');
+							stream.setWindow(parseInt(wnd[0]),parseInt(wnd[1]));
+						}catch(err){
+							//do nothing
+						}
+					})
+				}
 			}
 			process.stdin.resume();
 		};
