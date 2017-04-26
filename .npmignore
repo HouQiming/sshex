@@ -1,2 +1,4 @@
 node_modules/
 notebook.json
+.gitignore
+.npmignore

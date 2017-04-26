@@ -19,6 +19,7 @@
     "ssh",
     "client"
   ],
+  "readme": "README.md",
   "author": "Qiming Hou",
   "license": "MIT"
 }
