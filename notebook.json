@@ -34,9 +34,12 @@ v2
 }
 =====í¯¿í¿¿=====
 # TODO LIST
+download progress / continue downloading...
+	or rather, copy IP / create command line
 mget / mput
 npm install scripts
 test on Linux
+HTTP proxy
 release
 
 =====í¯¿í¿¿=====

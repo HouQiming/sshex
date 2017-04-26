@@ -1,5 +1,4 @@
 'use strict'
-const colors=require('colors/safe');
 const path=require('path');
 const os=require('os');
 const fs=require('fs');
@@ -7,6 +6,7 @@ const net=require('net');
 const readline = require('readline');
 const child_process=require('child_process');
 const options=require('commander');
+const colors=require('chalk');
 const stringArgv = require('string-argv');
 const Client = require('ssh2').Client;
 const ESCAPE_KEY='\u0011';
@@ -14,7 +14,7 @@ const MAX_LINE_BUF=256;
 colors.enabled=1;
 
 var g_commands={
-	//todo: install key, maybe HTTP server for port forwarding...
+	//todo: maybe HTTP server for port forwarding...
 	'help':function(conn,args,callback){
 		process.stdout.write([
 			"Welcome to the sshex escape prompt, supported commands:\n",
@@ -227,12 +227,18 @@ var g_commands={
 	}
 	process.stdout.setEncoding('utf8');
 	process.stderr.setEncoding('utf8');
+	var collect=function(val,arr){
+		arr.push(val);
+		return arr;
+	};
 	(options
 		.usage('[options] [user@]hostname [command]')
 		.option('-p, --port <port>', 'Specify a port',function(a){return parseInt(a);},22)
 		.option('-i, --identity', 'Specify a private key file')
 		.option('-t, --pty', 'Request a pty')
 		.option('-C, --compression', 'Request compression')
+		.option('-L, --port_forward <port_url_port>', 'Forward a remote connection to a local port',collect,[])
+		.option('-R, --port_reverse <port_url_port>', 'Forward a local connection to a remote port',collect,[])
 		.option('--win-terminal-rows <rows>', 'Specify the number of rows in a windows terminal emulator')
 		.option('--win-terminal-cols <cols>', 'Specify the number of columns in a windows terminal emulator')
 		.parse(process.argv));
@@ -397,6 +403,13 @@ var g_commands={
 			}
 			process.stdin.resume();
 		};
+		//blindly start port forwarding
+		for(var i=0;i<options.port_forward.length;i++){
+			g_commands.port_forward(conn,['port_forward'].concat(options.port_forward[i].split(':')),function(){});
+		}
+		for(var i=0;i<options.port_reverse.length;i++){
+			g_commands.port_reverse(conn,['port_reverse'].concat(options.port_reverse[i].split(':')),function(){});
+		}
 		if(options.args.length>=2){
 			var cmd_string=options.args.slice(1).join(' ');
 			conn.exec(cmd_string,{pty:options.pty},BindStdio);
