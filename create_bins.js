@@ -21,9 +21,14 @@ We need to manually create wrappers for Windows:
 			fs.writeFileSync(path.join(path_bin_root,'sshex.cmd'),fs.readFileSync(path.join(__dirname,'sshex.cmd')).toString()
 				.replace(/c:\\tp\\sshex\\sshex\.js/g,path.join(__dirname,'sshex.js')));
 			fs.writeFileSync(path.join(path_bin_root,'sshex'),fs.readFileSync(path.join(__dirname,'sshex.sh')).toString()
-				.replace(/\/c\/tp\/sshex\/sshex\.js/g,'/'+path.join(__dirname,'sshex.sh').replace(/\\/g,'/').replace(/:/,'')));
+				.replace(/\/c\/tp\/sshex\/sshex\.js/g,'/'+path.join(__dirname,'sshex.js').replace(/\\/g,'/').replace(/:/,'')));
 		}else{
-			fs.symlinkSync(path.join(path_bin_root,'sshex'),path.join(__dirname,'sshex.js'));
+			try{
+				fs.symlinkSync(path.join(path_bin_root,'sshex'),path.join(__dirname,'sshex.js'));
+			}catch(err){
+				fs.unlinkSync(path.join(path_bin_root,'sshex'));
+				fs.symlinkSync(path.join(path_bin_root,'sshex'),path.join(__dirname,'sshex.js'));
+			}
 			fs.chmodSync(path.join(__dirname,'sshex.js'),0o755);
 		}
 	}else{

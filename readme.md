@@ -5,3 +5,7 @@ Install:
 npm install -g sshex
 sshex --help
 ```
+
+Features:
+- Current path detection from the bash prompt
+- Tab completion for remote files

@@ -1,6 +1,6 @@
 {
   "name": "sshex",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "An enhanced SSH client where you could press CTRL+Q to access a SFTP prompt at any time",
   "main": "sshex.js",
   "dependencies": {
