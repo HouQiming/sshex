@@ -474,7 +474,27 @@ var g_commands={
 									});
 								});
 							}else if(args.length>1&&args[0]==='put'){
-								//todo
+								var last_arg=args.pop();
+								var local_basename=path.basename(last_arg);
+								var local_dir=path.dirname(last_arg);
+								if(last_arg.match(/[\\/]$/)){
+									local_basename='';
+									local_dir=last_arg;
+								}
+								local_dir=path.resolve(os.homedir(),'Downloads',local_dir);
+								fs.readdir(local_dir,function(err,list) {
+									if(err){callback(null,[hits,line]);return;}
+									var isdirSafe=function(fn){
+										try{
+											return fs.statSync(fn).isDirectory();
+										}catch(err){
+											return 0;
+										}
+									};
+									var hits_all=list.map(a=>a+(isdirSafe(path.join(local_dir,a))?path.sep:''));
+									var hist_match=hits_all.filter(a=>(a.indexOf(local_basename)===0));
+									callback(null,[hist_match.length?hist_match:hits_all,local_basename]);
+								});
 							}else{
 								for(var cmd in g_commands){
 									if(!line||cmd.indexOf(line)===0){
