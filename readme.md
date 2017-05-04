@@ -8,4 +8,4 @@ sshex --help
 
 Features:
 - Current path detection from the bash prompt
-- Tab completion for remote files
+- Tab completion for local and remote files
