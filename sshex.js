@@ -364,6 +364,7 @@ var g_commands={
 	var in_escape_mode=0;
 	var stdout_line_buf=new Buffer(0);
 	var line_buf_enabled=1;
+	var stdin_queue=[];
 	conn.on('ready', function() {
 		process.stdin.removeAllListeners();
 		var tty_desc={};
@@ -566,6 +567,9 @@ var g_commands={
 					})
 				}
 			}
+			if(stdin_queue.length){
+				stream.write(Buffer.concat(stdin_queue));
+			}
 			process.stdin.resume();
 		};
 		//blindly start port forwarding
@@ -670,6 +674,7 @@ var g_commands={
 	});
 	//initial SIGINT test
 	process.stdin.on('data', function (ch) {
+		stdin_queue.push(ch);
 		ch = ch.toString('utf8');
 		switch (ch) {
 		case "\u0003":
