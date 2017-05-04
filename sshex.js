@@ -8,6 +8,7 @@ const readline = require('readline');
 const child_process=require('child_process');
 const options=require('commander');
 const colors=require('chalk');
+const Minimatch = require("minimatch").Minimatch;
 const stringArgv = require('string-argv');
 const Client = require('ssh2').Client;
 const ESCAPE_KEY='\u0011';
@@ -44,7 +45,7 @@ var g_commands={
 		var remote_file,local_file;
 		if(args.length<3){
 			remote_file=args[1];
-			local_file=path.join(os.homedir(),'Downloads',path.posix.basename(remote_file));
+			local_file=path.join(os.homedir(),'Downloads');
 		}else{
 			remote_file=args[1];
 			local_file=path.resolve(os.homedir(),'Downloads',args[2]);
@@ -55,15 +56,90 @@ var g_commands={
 		if(remote_file.match(/^~\//)){
 			remote_file=remote_file.slice(2);
 		}
+		////////////////////////////
 		conn.sftp(function(err, sftp) {
 			if(err){callback(err);return;}
-			sftp.fastGet(remote_file,local_file,function(err) {
-				if(!err){
-					process.stdout.write(['downloaded ',colors.bold.green(remote_file),' to ',colors.bold.green(local_file),'\n'].join(''));
-				}
-				sftp.end();
-				callback(err);
-			});
+			var downloadAll,downloadFile;
+			downloadFile=function(remote_file,local_file,callback){
+				console.log(remote_file,'=>',local_file)//todo
+				sftp.stat(remote_file,function(err,attrs){
+					if(err){callback(err);return;}
+					fs.stat(local_file,function(err,attrs_local){
+						if(err||!attrs_local.isDirectory()){
+						}else{
+							local_file=path.join(local_file,path.posix.basename(remote_file));
+						}
+						if(attrs.isDirectory()){
+							//recursive download
+							downloadAll(remote_file,
+								{match:function(){return 1;}},
+								local_file,
+								callback);
+						}else{
+							sftp.fastGet(remote_file,local_file,function(err) {
+								if(err){callback(err);return;}
+								if(!err){
+									process.stdout.write(['downloaded ',colors.bold.green(remote_file),' to ',colors.bold.green(local_file),'\n'].join(''));
+								}
+								callback(err);
+							});
+						}
+					});
+				})
+			};
+			downloadAll=function(remote_dir,matcher,local_dir,callback){
+				fs.stat(local_dir,function(err,attrs){
+					if(err||!attrs.isDirectory()){
+						try{
+							fs.mkdirSync(local_dir);
+							process.stdout.write(['created local directory ',colors.bold.green(local_dir),'\n'].join(''));
+						}catch(err){}
+					}
+					var is_dir=0;
+					try{
+						if(fs.statSync(local_dir).isDirectory()){
+							is_dir=1;
+						}
+					}catch(err){}
+					if(!is_dir){
+						callback(new Error('failed to create directory '+colors.green(local_dir)));
+					}
+					sftp.readdir(remote_dir,{},function(err,list) {
+						if(err){callback(err);return;}
+						var id=0;
+						var downloadNext=function(err){
+							if(err){callback(err);return;}
+							for(;;){
+								if(id>=list.length){
+									callback();
+									return;
+								}
+								var item=list[id++];
+								if(matcher.match(item.filename)){
+									downloadFile(path.posix.join(remote_dir,item.filename),local_dir,downloadNext);
+									break;
+								}
+							}
+						};
+						downloadNext();
+					});
+				})
+			};
+			if(remote_file.match(/[?*]/)){
+				//we need a remote file search
+				var remote_dir=path.posix.dirname(remote_file);
+				var s_pattern=path.posix.basename(remote_file);
+				var matcher=new Minimatch(s_pattern,{});
+				downloadAll(remote_dir,matcher,local_file,function(err){
+					sftp.end();
+					callback(err);
+				});
+			}else{
+				downloadFile(remote_file,local_file,function(err){
+					sftp.end();
+					callback(err);
+				});
+			}
 		});
 	},
 	'put':function(conn,args,callback){
@@ -311,7 +387,7 @@ var g_commands={
 				var pnewline=stdout_line_buf.lastIndexOf(10);
 				if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline+1));}
 				pnewline=stdout_line_buf.lastIndexOf(7);
-				if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline));}
+				if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline+1));}
 				pnewline=stdout_line_buf.lastIndexOf(27);
 				if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline));}
 				process.stdout.write(data);
