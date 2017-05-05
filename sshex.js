@@ -618,8 +618,10 @@ var g_commands={
 	conn.once('error',function(err){
 		//request password
 		if(options.args.length<2){
-			process.stdin.setRawMode(true);
-			process.stdin.setEncoding('utf8');
+			if(process.stdin.isTTY){
+				process.stdin.setRawMode(true);
+				process.stdin.setEncoding('utf8');
+			}
 			process.stdin.removeAllListeners();
 			process.stdin.resume();
 			process.stdout.write([options.args[0],"'s password: "].join(''));
