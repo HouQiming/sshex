@@ -1,6 +1,6 @@
 {
   "name": "sshex",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "An enhanced SSH client where you could press CTRL+Q to access a SFTP prompt at any time",
   "main": "sshex.js",
   "dependencies": {
@@ -17,6 +17,10 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "install": "node create_bins.js install",
     "uninstall": "node create_bins.js uninstall"
+  },
+  "repository" : {
+    "type" : "git",
+    "url" : "https://github.com/houqiming/sshex.git"
   },
   "keywords": [
     "ssh",
