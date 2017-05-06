@@ -339,16 +339,16 @@ var g_commands={
 	};
 	(options
 		.usage('[options] [user@]hostname [command]')
-		.option('-p, --port <port>', 'Specify a port',function(a){return parseInt(a);},22)
-		.option('-i, --identity', 'Specify a private key file')
-		.option('-t, --pty', 'Request a pty')
-		.option('-C, --compression', 'Request compression')
-		.option('-L, --port_forward <port_url_port>', 'Forward a remote connection to a local port',collect,[])
-		.option('-R, --port_reverse <port_url_port>', 'Forward a local connection to a remote port',collect,[])
-		.option('--via <url>', 'Specify a proxy that forwards connection to the final host, can be chained',collect,[])
-		.option('--win-alternative-terminal <tty>', 'Specify that the stdin pipe is actually a pty')
-		.option('--win-terminal-rows <rows>', 'Specify the number of rows in a windows terminal emulator')
-		.option('--win-terminal-cols <cols>', 'Specify the number of columns in a windows terminal emulator')
+		.option('-p, --port <port>', 'specify a port',function(a){return parseInt(a);},22)
+		.option('-i, --identity', 'specify a private key file')
+		.option('-t, --pty', 'request a pty')
+		.option('-C, --compression', 'request compression')
+		.option('-L, --port_forward <local_port:remote_host:remote_port>', 'forward a remote connection to a local port',collect,[])
+		.option('-R, --port_reverse <remote_port:local_host:local_port>', 'forward a local connection to a remote port',collect,[])
+		.option('--via <url>', 'specify a proxy that forwards connection to the final host\n\t<url> can be "http://", "socks5://", or "ssh://"\n\tYou can chain multiple proxies',collect,[])
+		.option('--win-alternative-terminal <tty>', 'specify that the stdin pipe is actually an msys/cygwin pty')
+		.option('--win-terminal-rows <rows>', 'specify the number of rows in a windows terminal emulator')
+		.option('--win-terminal-cols <cols>', 'specify the number of columns in a windows terminal emulator')
 		.parse(process.argv));
 	if(options.args.length<1||!options.args[0]){
 		if(options.winAlternativeTerminal){
