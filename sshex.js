@@ -5,12 +5,15 @@ const path=require('path');
 const os=require('os');
 const fs=require('fs');
 const net=require('net');
+const url=require('url');
+const timers=require('timers');
 const readline = require('readline');
 const child_process=require('child_process');
 const options=require('commander');
 const colors=require('chalk');
 const Minimatch = require("minimatch").Minimatch;
 const stringArgv = require('string-argv');
+const socks5_client=require("./socks5_client.js");
 const Client = require('ssh2').Client;
 const ESCAPE_KEY='\u0011';
 const MAX_LINE_BUF=256;
@@ -342,6 +345,7 @@ var g_commands={
 		.option('-C, --compression', 'Request compression')
 		.option('-L, --port_forward <port_url_port>', 'Forward a remote connection to a local port',collect,[])
 		.option('-R, --port_reverse <port_url_port>', 'Forward a local connection to a remote port',collect,[])
+		.option('--via <url>', 'Specify a proxy that forwards connection to the final host, can be chained',collect,[])
 		.option('--win-alternative-terminal <tty>', 'Specify that the stdin pipe is actually a pty')
 		.option('--win-terminal-rows <rows>', 'Specify the number of rows in a windows terminal emulator')
 		.option('--win-terminal-cols <cols>', 'Specify the number of columns in a windows terminal emulator')
@@ -366,7 +370,7 @@ var g_commands={
 			known_hosts.push({
 				host_port_array:tokens[0].split(','),
 				sig_format:tokens[1],
-				key:tokens[2],
+				key:tokens[2].replace(/\r/g,''),
 			});
 		}
 	}catch(err){};
@@ -377,7 +381,7 @@ var g_commands={
 			private_key=fs.readFileSync(options.identity);
 			auth_methods.push({type:'key',privateKey:private_key,fn_private_key:options.identity});
 		}catch(err){
-			process.stdout.write(['failed to read ',options.identity].join(''));
+			process.stdout.write(['Failed to read ',options.identity].join(''));
 		}
 	}else{
 		var names=['id_rsa','id_dsa','id_ecdsa','id_ed25519'];
@@ -393,16 +397,41 @@ var g_commands={
 		auth_methods.push({type:'password'});
 	}
 	var verification_failed=0;
-	var CreateSSHConnection=function(session_desc){
+	var abort=function(){
+		process._exitCode=1;
+		process.stdin.pause();
+		timers.setTimeout(function(){
+			process.exit(1);
+		},100);
+	};
+	var CreateSSHConnection=function(session_desc,ssh_callback){
+		//todo: move authentication sequence upstream to ssh2... could bundle the keys in an agent, then call authPassword manually
 		var conn = new Client();
 		var s_session_prefix=[session_desc.username,'@',session_desc.host,':'].join('');
 		conn.m_session_prefix=s_session_prefix;
 		var p_auth_method=0;
 		var callConnect=function(){
+			var host_port=session_desc.port===22?session_desc.host:['[',session_desc.host,']:',session_desc.port].join('');
+			session_desc.algorithms=undefined;
+			for(var i=0;i<known_hosts.length;i++){
+				if(known_hosts[i].host_port_array.indexOf(host_port)>=0){
+					session_desc.algorithms={serverHostKey:[known_hosts[i].sig_format]};
+				}
+			}
 			conn.once('error',function(err){
-				doAuth();
+				if(err.level==='client-authentication'&&!session_desc.sock){
+					doAuth();
+				}else{
+					ssh_callback(err,conn);
+				}
 			});
-			conn.connect(session_desc);
+			try{
+				conn.connect(session_desc);
+			}catch(err){
+				process.stdout.write([err.message,'\n'].join(''));
+				abort();
+				return conn;
+			}
 			conn._sshstream.once('fingerprint',function(key, verify) {
 				var host_port=session_desc.port===22?session_desc.host:['[',session_desc.host,']:',session_desc.port].join('');
 				var skey=key.toString('base64');
@@ -433,8 +462,8 @@ var g_commands={
 				}
 				if(is_good){verify(1);return;}
 				process.stdout.write([
-					colors.bold('THIS IS THE FIRST TIME YOU CONNECT TO '),colors.bold(host_port),'\n',
-					'The server reports as "',colors.bold(sha1digest(skey)),'".\n',
+					colors.bold.yellow('*** FIRST CONNECTION TO THIS SERVER ***'),'\n',
+					colors.bold(host_port),' identifies as "',colors.bold(sha1digest(skey)),'".\n',
 					"I'm going to remember this server in ",colors.bold(fn_known_hosts),"\n",
 				].join(''));
 				conn.m_is_new_host={host_port:host_port,skey:skey};
@@ -449,8 +478,7 @@ var g_commands={
 		};
 		var doAuth=function(){
 			if(p_auth_method>=auth_methods.length||verification_failed){
-				process.stdout.write(['Failed to connect to ',s_session_prefix.slice(0,s_session_prefix.length-1),'\n'].join(''));
-				process.stdin.pause();
+				ssh_callback(new Error('All configured authentication methods failed'),conn);
 				return;
 			}
 			var method_i=auth_methods[p_auth_method++];
@@ -504,8 +532,10 @@ var g_commands={
 				});
 			}
 		};
+		conn.on('ready',function(){
+			ssh_callback(null,conn);
+		})
 		doAuth();
-		return conn;
 	};
 	///////////////////////////////
 	var hostname=options.args[0];
@@ -517,244 +547,252 @@ var g_commands={
 	}
 	var session_desc={
 		host: hostname,
-		port: options.port,
+		port: options.port||22,
 		username: user,
 		compress: !!options.compression,
 	};
-	var conn = CreateSSHConnection(session_desc);
-	var in_escape_mode=0;
-	var stdout_line_buf=new Buffer(0);
-	var line_buf_enabled=1;
 	var stdin_queue=[];
-	conn.on('ready', function() {
-		process.stdin.removeAllListeners();
-		var tty_desc={};
-		if(process.stdout.isTTY){
-			tty_desc={
-				rows:process.stdout.rows,
-				cols:process.stdout.columns,
-				term:process.env["TERM"]||"cygwin",
-			};
-		}else{
-			//if(process.platform==='win32'){
-			//	tty_desc.rows=parseInt(process.env["LINES"]);
-			//	tty_desc.cols=parseInt(process.env["COLUMNS"])
-			//}
-			if(options.winTerminalRows){tty_desc.rows=parseInt(options.winTerminalRows);}
-			if(options.winTerminalCols){tty_desc.cols=parseInt(options.winTerminalCols);}
-			if(tty_desc.rows||tty_desc.cols){
-				tty_desc.term=process.env["TERM"];
-				process.stdout.columns=tty_desc.cols;
+	var runMainPart=function(session_desc){
+		CreateSSHConnection(session_desc,function(err,conn){
+			if(err){
+				process.stdout.write(['Failed to connect to "',conn.m_session_prefix.slice(0,conn.m_session_prefix.length-1),'": ',err.message,'\n'].join(''));
+				abort();
+				return;
 			}
-		}
-		var BindStdio=function(err, stream) {
-			if (err){throw err;}
-			var rl=undefined;
-			var winch_catcher=null;
-			conn.m_shell_stream=stream;
-			stream.on('close', function() {
-				conn.end();
-				if(options.args.length==1){
-					//shell
-					console.log('Connection to',hostname,'closed.');
-				}
-				if(winch_catcher){
-					winch_catcher.kill('SIGINT');
-					winch_catcher.on('exit',function(){
-						process.exit();
-					});
-				}else{
-					process.exit();
-				}
-			}).on('data', function(data) {
-				if(line_buf_enabled){
-					if(data.length>MAX_LINE_BUF){
-						stdout_line_buf=new Buffer(data.slice(data.length-MAX_LINE_BUF));
-					}else{
-						stdout_line_buf=Buffer.concat([stdout_line_buf,data]);
-					}
-					var pnewline=stdout_line_buf.lastIndexOf(10);
-					if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline+1));}
-					pnewline=stdout_line_buf.lastIndexOf(7);
-					if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline+1));}
-					pnewline=stdout_line_buf.lastIndexOf(27);
-					if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline));}
-				}
-				process.stdout.write(data);
-			}).stderr.on('data', function(data) {
-				process.stderr.write(data);
-			});
-			process.on('exit', () => {
-				stream.end();
-			});
-			process.stdin.on('data',function(data){
-				if(in_escape_mode){return;}
-				line_buf_enabled=0;
-				if(data.length===1&&data[0]===13){
-					line_buf_enabled=1;
-				}
-				if(data.length===1&&data.toString('utf8')===ESCAPE_KEY){
-					//get pwd from their bash prompt - keep a line buffer, use it to determine our prompt
-					var s_bash_prompt=stdout_line_buf.toString('utf8');
-					var match=s_bash_prompt.match(/\[[^ ]* (.*)\][#$][ \t]*$/);
-					if(!match){match=s_bash_prompt.match(/[^ :]*:(.*)[#$][ \t]*$/);}
-					var their_pwd='~';
-					if(match){
-						their_pwd=match[1];
-					}
-					//enter the escape mode
-					in_escape_mode=1;
-					rl=readline.createInterface({
-						completer:function(line,callback){
-							var hits=[];
-							var args=stringArgv(line);
-							if(args.length>1&&args[0]==='get'){
-								//tab-over-the-sftp
-								var last_arg=args.pop();
-								var remote_basename=path.posix.basename(last_arg);
-								var remote_dir=path.posix.dirname(last_arg);
-								if(last_arg.match(/[/]$/)){
-									remote_basename='';
-									remote_dir=last_arg;
-								}
-								if(!remote_dir){
-									remote_dir=conn.m_their_pwd;
-								}else if(!remote_dir.match(/^[~/]/)){
-									remote_dir=[conn.m_their_pwd,'/',remote_dir].join('');
-								}
-								if(remote_dir.match(/^~\//)){
-									remote_dir=remote_dir.slice(2);
-								}
-								conn.sftp(function(err, sftp) {
-									if(err){callback(null,[hits,line]);return;}
-									sftp.readdir(remote_dir,function(err,list) {
-										sftp.end();
-										if(err){callback(null,[hits,line]);return;}
-										var hits_all=list.map(a=>a.filename+(a.attrs.isDirectory()?'/':''));
-										var hist_match=hits_all.filter(a=>(a.indexOf(remote_basename)===0));
-										callback(null,[hist_match.length?hist_match:hits_all,remote_basename]);
-									});
-								});
-							}else if(args.length>1&&args[0]==='put'){
-								var last_arg=args.pop();
-								var local_basename=path.basename(last_arg);
-								var local_dir=path.dirname(last_arg);
-								if(last_arg.match(/[\\/]$/)){
-									local_basename='';
-									local_dir=last_arg;
-								}
-								local_dir=path.resolve(os.homedir(),'Downloads',local_dir);
-								fs.readdir(local_dir,function(err,list) {
-									if(err){callback(null,[hits,line]);return;}
-									var isdirSafe=function(fn){
-										try{
-											return fs.statSync(fn).isDirectory();
-										}catch(err){
-											return 0;
-										}
-									};
-									var hits_all=list.map(a=>a+(isdirSafe(path.join(local_dir,a))?path.sep:''));
-									var hist_match=hits_all.filter(a=>(a.indexOf(local_basename)===0));
-									callback(null,[hist_match.length?hist_match:hits_all,local_basename]);
-								});
-							}else{
-								for(var cmd in g_commands){
-									if(!line||cmd.indexOf(line)===0){
-										hits.push(cmd);
-									}
-								}
-								callback(null,[hits,line]);
-							}
-						},
-						terminal:true,
-						input: process.stdin,
-						output: process.stdout,
-					});
-					conn.m_their_pwd=their_pwd;
-					rl.setPrompt(['sshex:',colors.bold.yellow(their_pwd),'$ '].join(''));
-					rl.prompt();
-					rl.on('SIGINT',function(line){
-						process.stdout.write('\r\u001b[0K'+s_bash_prompt);
-						rl.close();
-					});
-					rl.on('line',function(line){
-						rl.pause();
-						var args=stringArgv(line);
-						var commandIsDone=function(err){
-							if(err){
-								process.stdout.write([colors.bold.red(err.message),'\n'].join(''));
-							}
-							process.stdout.write(s_bash_prompt);
-							rl.close();
-						};
-						if(args.length>0&&g_commands[args[0]]){
-							g_commands[args[0]](conn,args,commandIsDone);
-						}else{
-							commandIsDone(args[0]?new Error(['invalid command: "',args[0],'"'].join('')):undefined);
-						}
-					});
-					rl.on('close',function(){
-						in_escape_mode=0;
-						rl=undefined;
-						if(process.stdin.isTTY){
-							process.stdin.setRawMode(true);
-							process.stdin.setEncoding('utf8');
-						}
-						process.stdin.resume();
-					})
+			var in_escape_mode=0;
+			var stdout_line_buf=new Buffer(0);
+			var line_buf_enabled=1;
+			conn.on('tcp connection', function(info, accept, reject) {
+				var callback=conn.m_reversing_ports[info.destPort];
+				if(!callback){
+					reject();
 					return;
 				}
-				stream.write(data);
+				callback(null,accept());
 			});
+			conn.m_port_reset_jobs=[];
+			conn.m_reversing_ports={};
+			process.stdin.removeAllListeners();
+			var tty_desc={};
 			if(process.stdout.isTTY){
-				process.stdout.on('resize',function(){
-					stream.setWindow(process.stdout.rows,process.stdout.columns);
-				})
-			}else if(options.winAlternativeTerminal){
-				winch_catcher=child_process.spawn("sh.exe",[path.join(__dirname,"catch_winch.sh"),options.winAlternativeTerminal],{
-					stdio:['ignore', 'inherit', 'pipe']
-				},function(){
-					//do nothing
-				});
-				if(winch_catcher){
-					winch_catcher.stderr.on('data',function(data){
-						try{
-							var s=data.toString();
-							var wnd=s.replace(/[\r\n]/g,'').split(' ');
-							stream.setWindow(parseInt(wnd[0]),parseInt(wnd[1]));
-						}catch(err){
-							//do nothing
-						}
-					})
+				tty_desc={
+					rows:process.stdout.rows,
+					cols:process.stdout.columns,
+					term:process.env["TERM"]||"cygwin",
+				};
+			}else{
+				//if(process.platform==='win32'){
+				//	tty_desc.rows=parseInt(process.env["LINES"]);
+				//	tty_desc.cols=parseInt(process.env["COLUMNS"])
+				//}
+				if(options.winTerminalRows){tty_desc.rows=parseInt(options.winTerminalRows);}
+				if(options.winTerminalCols){tty_desc.cols=parseInt(options.winTerminalCols);}
+				if(tty_desc.rows||tty_desc.cols){
+					tty_desc.term=process.env["TERM"];
+					process.stdout.columns=tty_desc.cols;
 				}
 			}
-			if(stdin_queue.length){
-				stream.write(Buffer.concat(stdin_queue));
+			var BindStdio=function(err, stream) {
+				if (err){throw err;}
+				var rl=undefined;
+				var winch_catcher=null;
+				conn.m_shell_stream=stream;
+				stream.on('close', function() {
+					conn.end();
+					if(options.args.length==1){
+						//shell
+						console.log('Connection to',hostname,'closed.');
+					}
+					if(winch_catcher){
+						winch_catcher.kill('SIGINT');
+						winch_catcher.on('exit',function(){
+							process.exit();
+						});
+					}else{
+						process.exit();
+					}
+				}).on('data', function(data) {
+					if(line_buf_enabled){
+						if(data.length>MAX_LINE_BUF){
+							stdout_line_buf=new Buffer(data.slice(data.length-MAX_LINE_BUF));
+						}else{
+							stdout_line_buf=Buffer.concat([stdout_line_buf,data]);
+						}
+						var pnewline=stdout_line_buf.lastIndexOf(10);
+						if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline+1));}
+						pnewline=stdout_line_buf.lastIndexOf(7);
+						if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline+1));}
+						pnewline=stdout_line_buf.lastIndexOf(27);
+						if(pnewline>=0){stdout_line_buf=new Buffer(stdout_line_buf.slice(pnewline));}
+					}
+					process.stdout.write(data);
+				}).stderr.on('data', function(data) {
+					process.stderr.write(data);
+				});
+				process.on('exit', () => {
+					stream.end();
+				});
+				process.stdin.on('data',function(data){
+					if(in_escape_mode){return;}
+					line_buf_enabled=0;
+					if(data.length===1&&data[0]===13){
+						line_buf_enabled=1;
+					}
+					if(data.length===1&&data.toString('utf8')===ESCAPE_KEY){
+						//get pwd from their bash prompt - keep a line buffer, use it to determine our prompt
+						var s_bash_prompt=stdout_line_buf.toString('utf8');
+						var match=s_bash_prompt.match(/\[[^ ]* (.*)\][#$][ \t]*$/);
+						if(!match){match=s_bash_prompt.match(/[^ :]*:(.*)[#$][ \t]*$/);}
+						var their_pwd='~';
+						if(match){
+							their_pwd=match[1];
+						}
+						//enter the escape mode
+						in_escape_mode=1;
+						rl=readline.createInterface({
+							completer:function(line,callback){
+								var hits=[];
+								var args=stringArgv(line);
+								if(args.length>1&&args[0]==='get'){
+									//tab-over-the-sftp
+									var last_arg=args.pop();
+									var remote_basename=path.posix.basename(last_arg);
+									var remote_dir=path.posix.dirname(last_arg);
+									if(last_arg.match(/[/]$/)){
+										remote_basename='';
+										remote_dir=last_arg;
+									}
+									if(!remote_dir){
+										remote_dir=conn.m_their_pwd;
+									}else if(!remote_dir.match(/^[~/]/)){
+										remote_dir=[conn.m_their_pwd,'/',remote_dir].join('');
+									}
+									if(remote_dir.match(/^~\//)){
+										remote_dir=remote_dir.slice(2);
+									}
+									conn.sftp(function(err, sftp) {
+										if(err){callback(null,[hits,line]);return;}
+										sftp.readdir(remote_dir,function(err,list) {
+											sftp.end();
+											if(err){callback(null,[hits,line]);return;}
+											var hits_all=list.map(a=>a.filename+(a.attrs.isDirectory()?'/':''));
+											var hist_match=hits_all.filter(a=>(a.indexOf(remote_basename)===0));
+											callback(null,[hist_match.length?hist_match:hits_all,remote_basename]);
+										});
+									});
+								}else if(args.length>1&&args[0]==='put'){
+									var last_arg=args.pop();
+									var local_basename=path.basename(last_arg);
+									var local_dir=path.dirname(last_arg);
+									if(last_arg.match(/[\\/]$/)){
+										local_basename='';
+										local_dir=last_arg;
+									}
+									local_dir=path.resolve(os.homedir(),'Downloads',local_dir);
+									fs.readdir(local_dir,function(err,list) {
+										if(err){callback(null,[hits,line]);return;}
+										var isdirSafe=function(fn){
+											try{
+												return fs.statSync(fn).isDirectory();
+											}catch(err){
+												return 0;
+											}
+										};
+										var hits_all=list.map(a=>a+(isdirSafe(path.join(local_dir,a))?path.sep:''));
+										var hist_match=hits_all.filter(a=>(a.indexOf(local_basename)===0));
+										callback(null,[hist_match.length?hist_match:hits_all,local_basename]);
+									});
+								}else{
+									for(var cmd in g_commands){
+										if(!line||cmd.indexOf(line)===0){
+											hits.push(cmd);
+										}
+									}
+									callback(null,[hits,line]);
+								}
+							},
+							terminal:true,
+							input: process.stdin,
+							output: process.stdout,
+						});
+						conn.m_their_pwd=their_pwd;
+						rl.setPrompt(['sshex:',colors.bold.green(their_pwd),'$ '].join(''));
+						rl.prompt();
+						rl.on('SIGINT',function(line){
+							process.stdout.write('\r\u001b[0K'+s_bash_prompt);
+							rl.close();
+						});
+						rl.on('line',function(line){
+							rl.pause();
+							var args=stringArgv(line);
+							var commandIsDone=function(err){
+								if(err){
+									process.stdout.write([colors.bold.red(err.message),'\n'].join(''));
+								}
+								process.stdout.write(s_bash_prompt);
+								rl.close();
+							};
+							if(args.length>0&&g_commands[args[0]]){
+								g_commands[args[0]](conn,args,commandIsDone);
+							}else{
+								commandIsDone(args[0]?new Error(['invalid command: "',args[0],'"'].join('')):undefined);
+							}
+						});
+						rl.on('close',function(){
+							in_escape_mode=0;
+							rl=undefined;
+							if(process.stdin.isTTY){
+								process.stdin.setRawMode(true);
+								process.stdin.setEncoding('utf8');
+							}
+							process.stdin.resume();
+						})
+						return;
+					}
+					stream.write(data);
+				});
+				if(process.stdout.isTTY){
+					process.stdout.on('resize',function(){
+						stream.setWindow(process.stdout.rows,process.stdout.columns);
+					})
+				}else if(options.winAlternativeTerminal){
+					winch_catcher=child_process.spawn("sh.exe",[path.join(__dirname,"catch_winch.sh"),options.winAlternativeTerminal],{
+						stdio:['ignore', 'inherit', 'pipe']
+					},function(){
+						//do nothing
+					});
+					if(winch_catcher){
+						winch_catcher.stderr.on('data',function(data){
+							try{
+								var s=data.toString();
+								var wnd=s.replace(/[\r\n]/g,'').split(' ');
+								stream.setWindow(parseInt(wnd[0]),parseInt(wnd[1]));
+							}catch(err){
+								//do nothing
+							}
+						})
+					}
+				}
+				if(stdin_queue.length){
+					stream.write(Buffer.concat(stdin_queue));
+				}
+				process.stdin.resume();
+			};
+			//blindly start port forwarding
+			for(var i=0;i<options.port_forward.length;i++){
+				g_commands.port_forward(conn,['port_forward'].concat(options.port_forward[i].split(':')),function(){});
 			}
-			process.stdin.resume();
-		};
-		//blindly start port forwarding
-		for(var i=0;i<options.port_forward.length;i++){
-			g_commands.port_forward(conn,['port_forward'].concat(options.port_forward[i].split(':')),function(){});
-		}
-		for(var i=0;i<options.port_reverse.length;i++){
-			g_commands.port_reverse(conn,['port_reverse'].concat(options.port_reverse[i].split(':')),function(){});
-		}
-		if(options.args.length>=2){
-			var cmd_string=options.args.slice(1).join(' ');
-			conn.exec(cmd_string,{pty:options.pty},BindStdio);
-		}else{
-			conn.shell(tty_desc,BindStdio);
-		}
-	})
-	conn.on('tcp connection', function(info, accept, reject) {
-		var callback=conn.m_reversing_ports[info.destPort];
-		if(!callback){
-			reject();
-			return;
-		}
-		callback(null,accept());
-	});
+			for(var i=0;i<options.port_reverse.length;i++){
+				g_commands.port_reverse(conn,['port_reverse'].concat(options.port_reverse[i].split(':')),function(){});
+			}
+			if(options.args.length>=2){
+				var cmd_string=options.args.slice(1).join(' ');
+				conn.exec(cmd_string,{pty:options.pty},BindStdio);
+			}else{
+				conn.shell(tty_desc,BindStdio);
+			}
+		});
+	};
 	//initial SIGINT test
 	process.stdin.on('data', function (ch) {
 		stdin_queue.push(ch);
@@ -767,6 +805,181 @@ var g_commands={
 		}
 	});
 	process.stdin.resume();
-	conn.m_port_reset_jobs=[];
-	conn.m_reversing_ports={};
+	//////////////
+	var fnext_step=runMainPart;
+	var chainStep=function(fcurrent_step){
+		var f=fnext_step;
+		fnext_step=function(my_session_desc){
+			fcurrent_step(my_session_desc,f);
+		}
+	};
+	var need_sock=0;
+	for(var i=options.via.length-1;i>=0;i--){
+		var proxy_url=url.parse(options.via[i]);
+		if(!proxy_url.protocol){
+			proxy_url=url.parse('ssh://'+options.via[i]);
+		}
+		var fstep_proxy=undefined;
+		switch(proxy_url.protocol){
+		default:{
+			process.stdout.write(['unsupported proxy protocol "',options.via[i],'"\n'].join(''));
+			abort();
+			return;
+		}break;case 'ssh:':{
+			proxy_url.port=(proxy_url.port||22);
+			chainStep(function(proxy_url,next_session_desc,my_session_desc,callback){
+				CreateSSHConnection({
+					host:proxy_url.host,
+					port:proxy_url.port,
+					username:proxy_url.auth,
+					sock:my_session_desc.sock,
+				},function(err,conn){
+					if(err){
+						process.stdout.write(['proxy "',proxy_url.href,'" has failed: ',err.message,'\n'].join(''));
+						abort();
+						return;
+					}
+					conn.forwardOut('127.0.0.1',12345,
+					next_session_desc.host, parseInt(next_session_desc.port),function(err, socket_remote) {
+						if(err){
+							process.stdout.write(['proxy "',proxy_url.href,'" has failed: ',err.message,'\n'].join(''));
+							abort();
+							conn.end();
+							return;
+						}
+						process.stdout.write(['connected to proxy "',colors.bold.yellow(proxy_url.href),'"\n'].join(''));
+						next_session_desc.sock=socket_remote;
+						socket_remote.on('close',function(){
+							conn.end();
+						})
+						callback(next_session_desc);
+					});
+				});
+			}.bind(this,proxy_url,session_desc));
+			need_sock=0;
+		}break;case 'http:':{
+			proxy_url.port=(proxy_url.port||80);
+			chainStep(function(proxy_url,next_session_desc,my_session_desc,callback){
+				var errored=0;
+				var socket=my_session_desc.sock;
+				socket.once('data',function(data){
+					var pcrlf=data.indexOf('\r\n\r\n');
+					if(pcrlf>=0){
+						if(data.slice(0,pcrlf+4).toString().match('^HTTP[^ ]* 200 .*\r\n')){
+							data=data.slice(pcrlf+4);
+							if(data.length){
+								timers.setImmediate(()=>{
+									socket.emit('data',data);
+								});
+							}
+							process.stdout.write(['connected to proxy "',colors.bold.yellow(proxy_url.href),'"\n'].join(''));
+							next_session_desc.sock=socket;
+							callback(next_session_desc);
+							return;
+						}
+					}
+					console.log(data.toString());
+					errored=1;
+					process.stdout.write(['proxy "',proxy_url.href,'" has failed: request rejected\n'].join(''));
+					socket.end();
+					abort();
+				})
+				socket.once('error',function(err){
+					if(errored){return;}
+					errored=1;
+					process.stdout.write(['proxy "',proxy_url.href,'" has failed: ',err.message,'\n'].join(''));
+					abort();
+				});
+				socket.once('close',function(){
+					if(errored){return;}
+					errored=1;
+					process.stdout.write(['proxy "',proxy_url.href,'" has failed: connection closed prematurely\n'].join(''));
+					abort();
+				});
+				// 
+				socket.write(['CONNECT ',next_session_desc.host,':',next_session_desc.port,' HTTP/1.0\r\n',
+					proxy_url.auth?'Proxy-Authorization: Basic '+new Buffer(proxy_url.auth).toString('base64')+'\r\n':'',
+					'Host: ',next_session_desc.host,':',next_session_desc.port,'\r\n\r\n'].join(''))
+			}.bind(this,proxy_url,session_desc));
+			need_sock=1;
+		}break;case 'socks5:':{
+			proxy_url.port=(proxy_url.port||1080);
+			chainStep(function(proxy_url,next_session_desc,my_session_desc,callback){
+				var socks5_options={
+					socket:my_session_desc.sock,
+				};
+				if(proxy_url.auth){
+					var auth_info=proxy_url.auth.split(':');
+					if(auth_info.length>=2){
+						socks5_options.socksUsername=auth_info[0];
+						socks5_options.socksPassword=auth_info.slice(1).join(':');
+					}else{
+						process.stdout.write(['you have to specify a password for "',proxy_url.href,'"\n'].join(''));
+						abort();
+						return;
+					}
+				}
+				var socket=new socks5_client(socks5_options);
+				var deed_done=0;
+				socket.connect(next_session_desc.port,next_session_desc.host);
+				socket.once('connect',function(){
+					deed_done=1;
+					process.stdout.write(['connected to proxy "',colors.bold.yellow(proxy_url.href),'"\n'].join(''));
+					next_session_desc.sock=socket;
+					callback(next_session_desc);
+				});
+				socket.setTimeout(20000);
+				socket.once('timeout',function(){
+					if(deed_done){return;}
+					deed_done=1;
+					socket.end();
+				});
+				socket.once('close',function(){
+					if(deed_done){return;}
+					deed_done=1;
+					process.stdout.write(['proxy "',proxy_url.href,'" has failed: connection closed prematurely\n'].join(''));
+					abort();
+				});
+				socket.once('error',function(err){
+					if(deed_done){return;}
+					deed_done=1;
+					process.stdout.write(['proxy "',proxy_url.href,'" has failed: ',err.message,'\n'].join(''));
+					abort();
+				});
+			}.bind(this,proxy_url,session_desc));
+			need_sock=1;
+		}}
+		session_desc={
+			host:proxy_url.hostname,
+			port:proxy_url.port,
+		};
+	}
+	if(need_sock){
+		chainStep((session_desc,callback)=>{
+			var socket=net.connect(session_desc);
+			var errored=0;
+			session_desc.sock=socket;
+			socket.once('connect',function(){
+				socket.removeAllListeners();
+				callback(session_desc);
+			});
+			socket.setTimeout(20000);
+			socket.once('timeout',function(){
+				socket.end();
+			});
+			socket.once('close',function(){
+				if(errored){return;}
+				errored=1;
+				process.stdout.write(['Our connection to "',session_desc.host,':',session_desc.port,'" was closed prematurely\n'].join(''));
+				abort();
+			});
+			socket.once('error',function(err){
+				if(errored){return;}
+				errored=1;
+				process.stdout.write(['Failed to connect to "',session_desc.host,':',session_desc.port,'": ',err.message,'\n',].join(''));
+				abort();
+			});
+		});
+	}
+	fnext_step(session_desc);
 })();
