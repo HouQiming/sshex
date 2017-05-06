@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-'use strict'
+'use strict';
+const crypto=require('crypto');
 const path=require('path');
 const os=require('os');
 const fs=require('fs');
@@ -353,6 +354,160 @@ var g_commands={
 		}
 		return;
 	}
+	///////////
+	var fn_known_hosts=path.join(os.homedir(),'.ssh','known_hosts');
+	var known_hosts=[];
+	try{
+		var data_known_hosts=fs.readFileSync(fn_known_hosts).toString();
+		var lines=data_known_hosts.split('\n');
+		for(var i=0;i<lines.length;i++){
+			var tokens=lines[i].split(' ');
+			if(tokens.length!==3){continue;}
+			known_hosts.push({
+				host_port_array:tokens[0].split(','),
+				sig_format:tokens[1],
+				key:tokens[2],
+			});
+		}
+	}catch(err){};
+	var auth_methods=[];
+	var private_key=undefined;
+	if(options.identity){
+		try{
+			private_key=fs.readFileSync(options.identity);
+			auth_methods.push({type:'key',privateKey:private_key,fn_private_key:options.identity});
+		}catch(err){
+			process.stdout.write(['failed to read ',options.identity].join(''));
+		}
+	}else{
+		var names=['id_rsa','id_dsa','id_ecdsa','id_ed25519'];
+		for(var i=0;i<names.length;i++){
+			try{
+				var fn_i=path.join(os.homedir(),'.ssh',names[i]);
+				private_key=fs.readFileSync(fn_i);
+				auth_methods.push({type:'key',privateKey:private_key,fn_private_key:fn_i});
+			}catch(err){}
+		}
+	}
+	if(options.args.length<2){
+		auth_methods.push({type:'password'});
+	}
+	var verification_failed=0;
+	var CreateSSHConnection=function(session_desc){
+		var conn = new Client();
+		var s_session_prefix=[session_desc.username,'@',session_desc.host,':'].join('');
+		conn.m_session_prefix=s_session_prefix;
+		var p_auth_method=0;
+		var callConnect=function(){
+			conn.once('error',function(err){
+				doAuth();
+			});
+			conn.connect(session_desc);
+			conn._sshstream.once('fingerprint',function(key, verify) {
+				var host_port=session_desc.port===22?session_desc.host:['[',session_desc.host,']:',session_desc.port].join('');
+				var skey=key.toString('base64');
+				var is_good=0;
+				var sha1digest=function(skey){
+					var sha1=crypto.createHash('sha1');
+					sha1.update(new Buffer(skey,'base64'));
+					return sha1.digest('hex').toUpperCase().replace(/../g,function(s){return ':'+s}).slice(1);
+				};
+				for(var i=0;i<known_hosts.length;i++){
+					if(known_hosts[i].host_port_array.indexOf(host_port)>=0){
+						if(known_hosts[i].key!==skey){
+							process.stdout.write([
+								colors.bold.red('*** SERVER CHANGED ***'),'\n',
+								colors.bold('THIS IS NOT THE SAME '),colors.bold(host_port),colors.bold(' YOU CONNECTED BEFORE!'),'\n',
+								'The old server identifies as "',colors.bold(sha1digest(known_hosts[i].key)),'".\n',
+								'The new server identifies as "',colors.bold.red(sha1digest(skey)),'".\n',
+								'If you still want to connect, delete the line with ',colors.bold(host_port),' from ',colors.bold(fn_known_hosts),'.\n',
+							].join(''));
+							verification_failed=1;
+							verify(0);
+							return;
+						}else{
+							is_good=1;
+							break;
+						}
+					}
+				}
+				if(is_good){verify(1);return;}
+				process.stdout.write([
+					colors.bold('THIS IS THE FIRST TIME YOU CONNECT TO '),colors.bold(host_port),'\n',
+					'The server reports as "',colors.bold(sha1digest(skey)),'".\n',
+					"I'm going to remember this server in ",colors.bold(fn_known_hosts),"\n",
+				].join(''));
+				conn.m_is_new_host={host_port:host_port,skey:skey};
+				verify(1);
+			});
+			conn._sshstream.once('KEXDH_REPLY',function(info){
+				if(conn.m_is_new_host){
+					fs.appendFileSync(fn_known_hosts,[conn.m_is_new_host.host_port,' ',info.sig_format,' ',conn.m_is_new_host.skey,'\n'].join(''));
+					conn.m_is_new_host=undefined;
+				}
+			});
+		};
+		var doAuth=function(){
+			if(p_auth_method>=auth_methods.length||verification_failed){
+				process.stdout.write(['Failed to connect to ',s_session_prefix.slice(0,s_session_prefix.length-1),'\n'].join(''));
+				process.stdin.pause();
+				return;
+			}
+			var method_i=auth_methods[p_auth_method++];
+			if(method_i.type==='key'){
+				session_desc.privateKey=method_i.privateKey;
+				conn.m_fn_private_key=method_i.fn_private_key;
+				callConnect();
+			}else{
+				//keep the last m_fn_private_key tried
+				if(process.stdin.isTTY){
+					process.stdin.setRawMode(true);
+					process.stdin.setEncoding('utf8');
+				}
+				process.stdin.removeAllListeners();
+				process.stdin.resume();
+				process.stdout.write([options.args[0],"'s password: "].join(''));
+				var password_array=[];
+				var tryAgain=function(canceled){
+					process.stdin.removeAllListeners();
+					process.stdin.pause();
+					if(!canceled){
+						session_desc.password=password_array.join('');
+						session_desc.privateKey=undefined;
+						callConnect();
+					}else{
+						process.exit(1);
+					}
+				}
+				process.stdin.on('data', function (ch) {
+					ch = ch.toString('utf8');
+					switch (ch) {
+					case "\n":
+					case "\r":
+					case "\u0004":
+						// They've finished typing their password
+						process.stdout.write('\n');
+						tryAgain(false);
+						break;
+					case "\u0003":
+						// Ctrl-C
+						tryAgain(true);
+						break;
+					case '\u0008':
+						if(password_array.length){password_array.pop();}
+						break;
+					default:
+						// More passsword characters
+						password_array.push(ch);
+						break;
+					}
+				});
+			}
+		};
+		doAuth();
+		return conn;
+	};
+	///////////////////////////////
 	var hostname=options.args[0];
 	var parts=hostname.split('@');
 	var user=undefined;
@@ -360,7 +515,13 @@ var g_commands={
 		user=parts[0];
 		hostname=parts.slice(1).join('@');
 	}
-	var conn = new Client();
+	var session_desc={
+		host: hostname,
+		port: options.port,
+		username: user,
+		compress: !!options.compression,
+	};
+	var conn = CreateSSHConnection(session_desc);
 	var in_escape_mode=0;
 	var stdout_line_buf=new Buffer(0);
 	var line_buf_enabled=1;
@@ -586,86 +747,6 @@ var g_commands={
 			conn.shell(tty_desc,BindStdio);
 		}
 	})
-	var private_key=undefined;
-	var fn_private_key=undefined;
-	if(options.identity){
-		try{
-			private_key=fs.readFileSync(options.identity);
-			fn_private_key=options.identity;
-		}catch(err){
-			process.stdout.write(['failed to read ',options.identity].join(''));
-		}
-	}else{
-		var names=['id_rsa','id_dsa','id_ecdsa','id_ed25519'];
-		for(var i=0;i<names.length;i++){
-			try{
-				var fn_i=path.join(os.homedir(),'.ssh',names[i]);
-				private_key=fs.readFileSync(fn_i);
-				fn_private_key=fn_i;
-				break;
-			}catch(err){}
-		}
-	}
-	conn.m_fn_private_key=fn_private_key;
-	var session_desc={
-		host: hostname,
-		port: options.port,
-		username: user,
-		privateKey: private_key,
-		compress: !!options.compression,
-	};
-	conn.m_session_prefix=[session_desc.username,'@',session_desc.host,':'].join('');
-	conn.once('error',function(err){
-		//request password
-		if(options.args.length<2){
-			if(process.stdin.isTTY){
-				process.stdin.setRawMode(true);
-				process.stdin.setEncoding('utf8');
-			}
-			process.stdin.removeAllListeners();
-			process.stdin.resume();
-			process.stdout.write([options.args[0],"'s password: "].join(''));
-			var password_array=[];
-			var tryAgain=function(canceled){
-				process.stdin.removeAllListeners();
-				process.stdin.pause();
-				if(!canceled){
-					session_desc.password=password_array.join('');
-					conn.once('error',function(err){
-						process.stdout.write([err.message,'\n','Connection failed'].join(''));
-					});
-					conn.connect(session_desc);
-				}else{
-					process.exit(1);
-				}
-			}
-			process.stdin.on('data', function (ch) {
-				ch = ch.toString('utf8');
-				switch (ch) {
-				case "\n":
-				case "\r":
-				case "\u0004":
-					// They've finished typing their password
-					process.stdout.write('\n');
-					tryAgain(false);
-					break;
-				case "\u0003":
-					// Ctrl-C
-					tryAgain(true);
-					break;
-				case '\u0008':
-					if(password_array.length){password_array.pop();}
-					break;
-				default:
-					// More passsword characters
-					password_array.push(ch);
-					break;
-				}
-			});
-		}else{
-			process.stdout.write([err.message,'\n','Connection failed'].join(''));
-		}
-	});
 	conn.on('tcp connection', function(info, accept, reject) {
 		var callback=conn.m_reversing_ports[info.destPort];
 		if(!callback){
@@ -688,5 +769,4 @@ var g_commands={
 	process.stdin.resume();
 	conn.m_port_reset_jobs=[];
 	conn.m_reversing_ports={};
-	conn.connect(session_desc);
 })();
